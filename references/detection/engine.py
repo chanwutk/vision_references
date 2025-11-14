@@ -9,7 +9,7 @@ from coco_eval import CocoEvaluator
 from coco_utils import get_coco_api_from_dataset
 
 
-def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq, scaler=None):
+def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq, scaler=None, clip_grad_norm=0.0):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
@@ -45,10 +45,15 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq, sc
         optimizer.zero_grad()
         if scaler is not None:
             scaler.scale(losses).backward()
+            if clip_grad_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
             losses.backward()
+            if clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             optimizer.step()
 
         if lr_scheduler is not None:

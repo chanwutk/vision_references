@@ -40,6 +40,32 @@ def copypaste_collate_fn(batch):
     return copypaste(*utils.collate_fn(batch))
 
 
+def compute_validation_loss(model, data_loader, device):
+    was_training = model.training
+    model.train()
+    
+    total_loss = 0.0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for images, targets in data_loader:
+            images = list(img.to(device) for img in images)
+            targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
+            
+            loss_dict = model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())
+            
+            total_loss += losses.item()
+            num_batches += 1
+    
+    # Restore original training state
+    if not was_training:
+        model.eval()
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
+    return avg_loss
+
+
 def get_dataset(is_train, args):
     image_set = "train" if is_train else "val"
     num_classes, mode = {"coco": (91, "instances"), "coco_kp": (2, "person_keypoints")}[args.dataset]
@@ -176,6 +202,26 @@ def get_args_parser(add_help=True):
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
     parser.add_argument("--use-v2", action="store_true", help="Use V2 transforms")
 
+    parser.add_argument(
+        "--track-best-loss",
+        action="store_true",
+        help="Track and save the model with the lowest validation loss as best_model.pth",
+    )
+    
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help="Number of classes (including background). If not set, uses dataset default.",
+    )
+    
+    parser.add_argument(
+        "--clip-grad-norm",
+        type=float,
+        default=0.0,
+        help="Max gradient norm for clipping (default: 0.0, disabled). Set to 1.0 or 10.0 to enable.",
+    )
+
     return parser
 
 
@@ -242,6 +288,12 @@ def main(args):
     if "rcnn" in args.model:
         if args.rpn_score_thresh is not None:
             kwargs["rpn_score_thresh"] = args.rpn_score_thresh
+    
+    # Use override num_classes if provided, otherwise use dataset default
+    if args.num_classes is not None:
+        num_classes = args.num_classes
+        print(f"Using override num_classes: {num_classes}")
+    
     model = torchvision.models.get_model(
         args.model, weights=args.weights, weights_backbone=args.weights_backbone, num_classes=num_classes, **kwargs
     )
@@ -303,10 +355,12 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
+    best_val_loss = float('inf')
+    best_epoch = -1
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        train_one_epoch(model, optimizer, data_loader, device, epoch, args.print_freq, scaler)
+        train_one_epoch(model, optimizer, data_loader, device, epoch, args.print_freq, scaler, args.clip_grad_norm)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint = {
@@ -321,12 +375,29 @@ def main(args):
             utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
             utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
+            # compute validation loss and track best model
+            if args.track_best_loss:
+                val_loss = compute_validation_loss(model, data_loader_test, device)
+                print(f"Validation loss: {val_loss:.4f}")
+                
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_epoch = epoch
+                    print(f"New best validation loss: {best_val_loss:.4f} at epoch {epoch}")
+                    
+                    # save best model by adding val_loss to existing checkpoint
+                    checkpoint["val_loss"] = val_loss
+                    utils.save_on_master(checkpoint, os.path.join(args.output_dir, "model_best.pth"))
+
         # evaluate after every epoch
         evaluate(model, data_loader_test, device=device)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Training time {total_time_str}")
+    
+    if args.track_best_loss:
+        print(f"\nBest validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
 
 
 if __name__ == "__main__":
