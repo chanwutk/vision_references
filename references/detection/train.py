@@ -389,8 +389,8 @@ def main(args):
                     checkpoint["val_loss"] = val_loss
                     utils.save_on_master(checkpoint, os.path.join(args.output_dir, "model_best.pth"))
 
-        # evaluate after every epoch
-        evaluate(model, data_loader_test, device=device)
+        # # evaluate after every epoch
+        # evaluate(model, data_loader_test, device=device)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
